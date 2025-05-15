@@ -1,4 +1,4 @@
-// oss.c
+// oss.c - Final Version with Multi-Child Support
 // Author: Curtis Been
 // Description: Master process for memory management simulation using LRU
 
@@ -61,12 +61,14 @@ typedef struct {
 int shm_id = -1, msg_id = -1;
 SharedData *shared;
 FILE *logfile;
+pid_t children[MAX_TOTAL_PROCESSES];
+int launched = 0, running = 0;
 
 void cleanup(int sig) {
+    for (int i = 0; i < launched; i++) kill(children[i], SIGTERM);
     if (shm_id != -1) shmctl(shm_id, IPC_RMID, NULL);
     if (msg_id != -1) msgctl(msg_id, IPC_RMID, NULL);
     if (logfile) fclose(logfile);
-    kill(0, SIGTERM);
     exit(0);
 }
 
@@ -100,12 +102,14 @@ int findFreeFrame() {
 }
 
 void logMemoryLayout() {
-    fprintf(logfile, "Current memory layout at time %d:%d is:\n", shared->clock.seconds, shared->clock.nanoseconds);
+    fprintf(logfile, "\nMemory layout at time %d:%d:\n", shared->clock.seconds, shared->clock.nanoseconds);
     for (int i = 0; i < FRAME_TABLE_SIZE; i++) {
         Frame *f = &shared->frameTable[i];
-        fprintf(logfile, "Frame %d: %s Dirty=%d LastRef=%d:%d PID=%d Page=%d\n",
-                i, f->occupied ? "Yes" : "No", f->dirtyBit, f->lastRef.seconds, f->lastRef.nanoseconds,
-                f->pid, f->pageNumber);
+        if (f->occupied) {
+            fprintf(logfile, "Frame %d: Dirty=%d LastRef=%d:%d PID=%d Page=%d\n",
+                    i, f->dirtyBit, f->lastRef.seconds, f->lastRef.nanoseconds,
+                    f->pid, f->pageNumber);
+        }
     }
     for (int p = 0; p < MAX_PROCESSES; p++) {
         fprintf(logfile, "P%d page table: ", p);
@@ -145,62 +149,69 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        execl("./user_proc", "user_proc", NULL);
-        perror("execl failed");
-        exit(1);
-    } else {
-        printf("[oss] Forked user_proc with PID %d\n", pid);
-    }
-
-    while (1) {
-        MessageToOSS msg;
-        if (msgrcv(msg_id, &msg, sizeof(msg) - sizeof(long), 1, 0) == -1) continue;
-
-        int page = msg.address / PAGE_SIZE;
-        int procIdx = msg.pid % MAX_PROCESSES;
-        int frame = shared->pageTables[procIdx].frameNumber[page];
-
-        if (frame != -1 && shared->frameTable[frame].pid == msg.pid && shared->frameTable[frame].pageNumber == page) {
-            fprintf(logfile, "oss: PID %d %s address %d (page %d) HIT in frame %d at time %d:%d\n",
-                    msg.pid, msg.isWrite ? "WRITE" : "READ", msg.address, page, frame,
-                    shared->clock.seconds, shared->clock.nanoseconds);
-
-            if (msg.isWrite) shared->frameTable[frame].dirtyBit = 1;
-            shared->frameTable[frame].lastRef = shared->clock;
-        } else {
-            fprintf(logfile, "oss: PID %d %s address %d (page %d) PAGE FAULT at time %d:%d\n",
-                    msg.pid, msg.isWrite ? "WRITE" : "READ", msg.address, page,
-                    shared->clock.seconds, shared->clock.nanoseconds);
-
-            int free = findFreeFrame();
-            if (free == -1) free = findLRUFrame();
-
-            if (shared->frameTable[free].dirtyBit) {
-                fprintf(logfile, "oss: Evicting dirty frame %d, adding disk I/O time\n", free);
-                advanceClock(&shared->clock, 0, DISK_IO_TIME_NS);
-            } else {
-                fprintf(logfile, "oss: Evicting frame %d\n", free);
+    while (launched < MAX_TOTAL_PROCESSES || running > 0) {
+        // Launch if below limit
+        if (launched < MAX_TOTAL_PROCESSES && running < MAX_PROCESSES) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("./user_proc", "user_proc", NULL);
+                perror("execl failed");
+                exit(1);
             }
-
-            shared->frameTable[free].occupied = 1;
-            shared->frameTable[free].dirtyBit = msg.isWrite;
-            shared->frameTable[free].pid = msg.pid;
-            shared->frameTable[free].pageNumber = page;
-            shared->frameTable[free].lastRef = shared->clock;
-            shared->pageTables[procIdx].frameNumber[page] = free;
+            children[launched++] = pid;
+            running++;
+            fprintf(logfile, "[oss] Forked PID %d (launched %d running %d)\n", pid, launched, running);
         }
 
-        MessageFromOSS reply;
-        reply.mtype = msg.pid;
-        reply.granted = 1;
-        msgsnd(msg_id, &reply, sizeof(reply) - sizeof(long), 0);
+        MessageToOSS msg;
+        if (msgrcv(msg_id, &msg, sizeof(msg) - sizeof(long), 1, IPC_NOWAIT) != -1) {
+            int page = msg.address / PAGE_SIZE;
+            int procIdx = msg.pid % MAX_PROCESSES;
+            int frame = shared->pageTables[procIdx].frameNumber[page];
+
+            if (frame != -1 && shared->frameTable[frame].pid == msg.pid && shared->frameTable[frame].pageNumber == page) {
+                fprintf(logfile, "oss: PID %d %s address %d (page %d) HIT in frame %d at %d:%d\n",
+                        msg.pid, msg.isWrite ? "WRITE" : "READ", msg.address, page, frame,
+                        shared->clock.seconds, shared->clock.nanoseconds);
+
+                if (msg.isWrite) shared->frameTable[frame].dirtyBit = 1;
+                shared->frameTable[frame].lastRef = shared->clock;
+            } else {
+                fprintf(logfile, "oss: PID %d %s address %d (page %d) PAGE FAULT\n",
+                        msg.pid, msg.isWrite ? "WRITE" : "READ", msg.address, page);
+
+                int free = findFreeFrame();
+                if (free == -1) free = findLRUFrame();
+
+                if (shared->frameTable[free].dirtyBit) {
+                    fprintf(logfile, "oss: Evicting dirty frame %d, adding disk I/O\n", free);
+                    advanceClock(&shared->clock, 0, DISK_IO_TIME_NS);
+                }
+
+                shared->frameTable[free].occupied = 1;
+                shared->frameTable[free].dirtyBit = msg.isWrite;
+                shared->frameTable[free].pid = msg.pid;
+                shared->frameTable[free].pageNumber = page;
+                shared->frameTable[free].lastRef = shared->clock;
+                shared->pageTables[procIdx].frameNumber[page] = free;
+            }
+
+            MessageFromOSS reply = { .mtype = msg.pid, .granted = 1 };
+            msgsnd(msg_id, &reply, sizeof(reply) - sizeof(long), 0);
+        }
+
+        // Reap exited children
+        int status;
+        pid_t done;
+        while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
+            running--;
+            fprintf(logfile, "[oss] Child PID %d exited. Running = %d\n", done, running);
+        }
 
         advanceClock(&shared->clock, 0, 100);
-
         if (shared->clock.nanoseconds % BILLION < 1000) logMemoryLayout();
     }
 
+    cleanup(0);
     return 0;
 }
