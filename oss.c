@@ -1,4 +1,4 @@
-// oss.c - Final Version with Multi-Child Support
+// oss.c 
 // Author: Curtis Been
 // Description: Master process for memory management simulation using LRU
 
