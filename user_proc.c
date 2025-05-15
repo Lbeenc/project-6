@@ -61,10 +61,12 @@ int main() {
         msg.address = address;
         msg.isWrite = isWrite;
 
-        msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0);
+        if (msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0) == -1)
+            break;
 
         MessageFromOSS reply;
-        msgrcv(msg_id, &reply, sizeof(reply) - sizeof(long), getpid(), 0);
+        if (msgrcv(msg_id, &reply, sizeof(reply) - sizeof(long), getpid(), 0) == -1)
+            break;
 
         memoryOps++;
         if (memoryOps >= 1000 + (rand() % 201)) break;
