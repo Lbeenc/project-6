@@ -39,21 +39,32 @@ typedef struct {
 int main() {
     srand(getpid() ^ time(NULL));
 
+    printf("user_proc (PID %d) starting\n", getpid());
+
     int shm_id = shmget(SHMKEY, sizeof(SharedData), 0666);
-    if (shm_id < 0) exit(1);
+    if (shm_id < 0) {
+        perror("shmget");
+        exit(1);
+    }
 
     SharedData *shared = (SharedData *)shmat(shm_id, NULL, 0);
-    if (shared == (void *)-1) exit(1);
+    if (shared == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
 
     int msg_id = msgget(MSGKEY, 0666);
-    if (msg_id < 0) exit(1);
+    if (msg_id < 0) {
+        perror("msgget");
+        exit(1);
+    }
 
     int memoryOps = 0;
     while (1) {
         int page = rand() % NUM_PAGES;
         int offset = rand() % PAGE_SIZE;
         int address = page * PAGE_SIZE + offset;
-        int isWrite = rand() % 10 < 3; // 30% chance write
+        int isWrite = rand() % 10 < 3;
 
         MessageToOSS msg;
         msg.mtype = 1;
@@ -61,16 +72,25 @@ int main() {
         msg.address = address;
         msg.isWrite = isWrite;
 
-        if (msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0) == -1)
+        printf("user_proc PID %d sending request for address %d (%s)\n", getpid(), address, isWrite ? "WRITE" : "READ");
+
+        if (msgsnd(msg_id, &msg, sizeof(msg) - sizeof(long), 0) == -1) {
+            perror("msgsnd");
             break;
+        }
 
         MessageFromOSS reply;
-        if (msgrcv(msg_id, &reply, sizeof(reply) - sizeof(long), getpid(), 0) == -1)
+        if (msgrcv(msg_id, &reply, sizeof(reply) - sizeof(long), getpid(), 0) == -1) {
+            perror("msgrcv");
             break;
+        }
+
+        printf("user_proc PID %d received reply, granted = %d\n", getpid(), reply.granted);
 
         memoryOps++;
         if (memoryOps >= 1000 + (rand() % 201)) break;
     }
 
+    printf("user_proc PID %d terminating\n", getpid());
     return 0;
 }
