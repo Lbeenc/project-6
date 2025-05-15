@@ -148,8 +148,10 @@ int main(int argc, char *argv[]) {
     pid_t pid = fork();
     if (pid == 0) {
         execl("./user_proc", "user_proc", NULL);
-        perror("execl");
+        perror("execl failed");
         exit(1);
+    } else {
+        printf("[oss] Forked user_proc with PID %d\n", pid);
     }
 
     while (1) {
